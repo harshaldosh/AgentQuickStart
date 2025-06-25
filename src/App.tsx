@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Video, ExternalLink, Play, AlertCircle, Bot, Mic } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Video, ExternalLink, Play, AlertCircle, Bot, Mic, Send, Copy, Check } from 'lucide-react';
 
 interface ConversationResponse {
   conversation_url: string;
@@ -12,6 +12,13 @@ interface ElevenLabsResponse {
 
 type Platform = 'tavus' | 'elevenlabs';
 
+// Declare Daily as a global variable
+declare global {
+  interface Window {
+    Daily: any;
+  }
+}
+
 function App() {
   const [platform, setPlatform] = useState<Platform>('tavus');
   
@@ -20,6 +27,8 @@ function App() {
   const [conversationName, setConversationName] = useState('');
   const [context, setContext] = useState('');
   const [replicaId, setReplicaId] = useState('');
+  const [result1, setResult1] = useState('');
+  const [result2, setResult2] = useState('');
   
   // ElevenLabs fields
   const [elevenLabsApiKey, setElevenLabsApiKey] = useState('');
@@ -30,6 +39,26 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [conversationUrl, setConversationUrl] = useState('');
+  const [conversationId, setConversationId] = useState('');
+  const [copiedText, setCopiedText] = useState('');
+  const [dailyCallObject, setDailyCallObject] = useState<any>(null);
+
+  // Cleanup Daily.js call object when component unmounts or conversation changes
+  useEffect(() => {
+    return () => {
+      if (dailyCallObject) {
+        dailyCallObject.destroy();
+      }
+    };
+  }, [dailyCallObject]);
+
+  // Reset Daily call object when switching platforms or starting new conversation
+  useEffect(() => {
+    if (dailyCallObject && (platform !== 'tavus' || !conversationUrl)) {
+      dailyCallObject.destroy();
+      setDailyCallObject(null);
+    }
+  }, [platform, conversationUrl, dailyCallObject]);
 
   const createTavusConversation = async (): Promise<ConversationResponse> => {
     const response = await fetch('https://tavusapi.com/v2/conversations', {
@@ -72,6 +101,51 @@ function App() {
     return data.signed_url;
   };
 
+  const initializeDailyCallObject = async (url: string) => {
+    try {
+      if (!window.Daily) {
+        throw new Error('Daily.js library not loaded');
+      }
+
+      const callFrame = window.Daily.createFrame({
+        url: url,
+        showLeaveButton: false,
+        showFullscreenButton: false,
+      });
+
+      await callFrame.join();
+      setDailyCallObject(callFrame);
+      
+      return callFrame;
+    } catch (err) {
+      console.error('Failed to initialize Daily call object:', err);
+      throw err;
+    }
+  };
+
+  const sendTavusMessage = async (text: string) => {
+    if (!dailyCallObject || !conversationId) {
+      throw new Error('Daily call object not initialized or conversation ID missing');
+    }
+
+    try {
+      const interactionPayload = {
+        message_type: "conversation",
+        event_type: "conversation.respond",
+        conversation_id: conversationId,
+        properties: {
+          text: text
+        }
+      };
+
+      await dailyCallObject.sendAppMessage(interactionPayload);
+      return true;
+    } catch (err) {
+      console.error('Failed to send message to Tavus:', err);
+      throw err;
+    }
+  };
+
   const handleJoin = async () => {
     setLoading(true);
     setError('');
@@ -82,6 +156,7 @@ function App() {
       if (platform === 'tavus') {
         const conversation = await createTavusConversation();
         url = conversation.conversation_url;
+        setConversationId(conversation.conversation_id);
       } else {
         url = await createElevenLabsConversation();
       }
@@ -89,7 +164,14 @@ function App() {
       setConversationUrl(url);
 
       if (showEmbedded) {
-        // Keep URL for embedded display
+        // For Tavus, initialize Daily.js call object for message sending
+        if (platform === 'tavus') {
+          try {
+            await initializeDailyCallObject(url);
+          } catch (err) {
+            console.warn('Failed to initialize Daily call object, falling back to clipboard:', err);
+          }
+        }
       } else {
         // Open in new tab
         window.open(url, '_blank');
@@ -101,9 +183,43 @@ function App() {
     }
   };
 
+  const copyToClipboard = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedText(text);
+      setTimeout(() => setCopiedText(''), 2000);
+    } catch (err) {
+      console.error('Failed to copy text:', err);
+      throw err;
+    }
+  };
+
+  const handleResultClick = async (resultText: string) => {
+    if (!resultText.trim()) return;
+
+    try {
+      if (platform === 'tavus' && dailyCallObject && conversationId) {
+        // Send message directly to Tavus conversation
+        await sendTavusMessage(resultText);
+        setError('Message sent to conversation successfully!');
+        setTimeout(() => setError(''), 3000);
+      } else {
+        // Fallback to clipboard for ElevenLabs or when Daily.js is not available
+        await copyToClipboard(resultText);
+        setError('Text copied to clipboard! You can paste it in the conversation.');
+        setTimeout(() => setError(''), 3000);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to send message');
+      setTimeout(() => setError(''), 5000);
+    }
+  };
+
   const isTavusFormValid = apiKey && conversationName && replicaId;
   const isElevenLabsFormValid = elevenLabsApiKey && agentId;
   const isFormValid = platform === 'tavus' ? isTavusFormValid : isElevenLabsFormValid;
+
+  const canSendDirectly = platform === 'tavus' && dailyCallObject && conversationId;
 
   return (
     <div className="min-h-screen bg-gray-50 p-6">
@@ -204,6 +320,86 @@ function App() {
                       placeholder="Provide context for the conversation (optional)"
                     />
                   </div>
+
+                  <div>
+                    <label htmlFor="result1" className="block text-sm font-medium text-gray-700 mb-2">
+                      Result 1
+                    </label>
+                    <div className="flex gap-2">
+                      <textarea
+                        id="result1"
+                        value={result1}
+                        onChange={(e) => setResult1(e.target.value)}
+                        rows={3}
+                        className="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
+                        placeholder="Enter result 1 content"
+                      />
+                      <button
+                        onClick={() => handleResultClick(result1)}
+                        disabled={!result1.trim()}
+                        className={`px-3 py-2 rounded-md transition-colors flex items-center gap-1 ${
+                          result1.trim()
+                            ? 'bg-blue-600 hover:bg-blue-700 text-white'
+                            : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                        }`}
+                        title={canSendDirectly ? "Send Result 1 to conversation" : "Copy Result 1 to clipboard"}
+                      >
+                        {canSendDirectly ? (
+                          <Send className="w-4 h-4" />
+                        ) : copiedText === result1 ? (
+                          <Check className="w-4 h-4" />
+                        ) : (
+                          <Copy className="w-4 h-4" />
+                        )}
+                      </button>
+                    </div>
+                    <p className="text-xs text-gray-500 mt-1">
+                      {canSendDirectly 
+                        ? "Click the send button to automatically send text to the conversation"
+                        : "Click the copy button to copy text, then paste it in the conversation"
+                      }
+                    </p>
+                  </div>
+
+                  <div>
+                    <label htmlFor="result2" className="block text-sm font-medium text-gray-700 mb-2">
+                      Result 2
+                    </label>
+                    <div className="flex gap-2">
+                      <textarea
+                        id="result2"
+                        value={result2}
+                        onChange={(e) => setResult2(e.target.value)}
+                        rows={3}
+                        className="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
+                        placeholder="Enter result 2 content"
+                      />
+                      <button
+                        onClick={() => handleResultClick(result2)}
+                        disabled={!result2.trim()}
+                        className={`px-3 py-2 rounded-md transition-colors flex items-center gap-1 ${
+                          result2.trim()
+                            ? 'bg-blue-600 hover:bg-blue-700 text-white'
+                            : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                        }`}
+                        title={canSendDirectly ? "Send Result 2 to conversation" : "Copy Result 2 to clipboard"}
+                      >
+                        {canSendDirectly ? (
+                          <Send className="w-4 h-4" />
+                        ) : copiedText === result2 ? (
+                          <Check className="w-4 h-4" />
+                        ) : (
+                          <Copy className="w-4 h-4" />
+                        )}
+                      </button>
+                    </div>
+                    <p className="text-xs text-gray-500 mt-1">
+                      {canSendDirectly 
+                        ? "Click the send button to automatically send text to the conversation"
+                        : "Click the copy button to copy text, then paste it in the conversation"
+                      }
+                    </p>
+                  </div>
                 </>
               ) : (
                 <>
@@ -234,6 +430,76 @@ function App() {
                       placeholder="Enter your ElevenLabs API key"
                     />
                   </div>
+
+                  <div>
+                    <label htmlFor="result1" className="block text-sm font-medium text-gray-700 mb-2">
+                      Result 1
+                    </label>
+                    <div className="flex gap-2">
+                      <textarea
+                        id="result1"
+                        value={result1}
+                        onChange={(e) => setResult1(e.target.value)}
+                        rows={3}
+                        className="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent resize-none"
+                        placeholder="Enter result 1 content"
+                      />
+                      <button
+                        onClick={() => handleResultClick(result1)}
+                        disabled={!result1.trim()}
+                        className={`px-3 py-2 rounded-md transition-colors flex items-center gap-1 ${
+                          result1.trim()
+                            ? 'bg-green-600 hover:bg-green-700 text-white'
+                            : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                        }`}
+                        title="Copy Result 1 to clipboard"
+                      >
+                        {copiedText === result1 ? (
+                          <Check className="w-4 h-4" />
+                        ) : (
+                          <Copy className="w-4 h-4" />
+                        )}
+                      </button>
+                    </div>
+                    <p className="text-xs text-gray-500 mt-1">
+                      Click the copy button to copy text, then paste it in the conversation
+                    </p>
+                  </div>
+
+                  <div>
+                    <label htmlFor="result2" className="block text-sm font-medium text-gray-700 mb-2">
+                      Result 2
+                    </label>
+                    <div className="flex gap-2">
+                      <textarea
+                        id="result2"
+                        value={result2}
+                        onChange={(e) => setResult2(e.target.value)}
+                        rows={3}
+                        className="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent resize-none"
+                        placeholder="Enter result 2 content"
+                      />
+                      <button
+                        onClick={() => handleResultClick(result2)}
+                        disabled={!result2.trim()}
+                        className={`px-3 py-2 rounded-md transition-colors flex items-center gap-1 ${
+                          result2.trim()
+                            ? 'bg-green-600 hover:bg-green-700 text-white'
+                            : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                        }`}
+                        title="Copy Result 2 to clipboard"
+                      >
+                        {copiedText === result2 ? (
+                          <Check className="w-4 h-4" />
+                        ) : (
+                          <Copy className="w-4 h-4" />
+                        )}
+                      </button>
+                    </div>
+                    <p className="text-xs text-gray-500 mt-1">
+                      Click the copy button to copy text, then paste it in the conversation
+                    </p>
+                  </div>
                 </>
               )}
 
@@ -257,6 +523,7 @@ function App() {
                     <span className="ml-2 text-sm text-gray-700 flex items-center gap-2">
                       {platform === 'tavus' ? <Video className="w-4 h-4" /> : <Bot className="w-4 h-4" />}
                       Show embedded on this page
+                      {platform === 'tavus' && <span className="text-xs text-blue-600">(enables direct message sending)</span>}
                     </span>
                   </label>
                   <label className="flex items-center">
@@ -280,9 +547,17 @@ function App() {
               </div>
 
               {error && (
-                <div className="flex items-center gap-2 p-3 bg-red-50 border border-red-200 rounded-md">
-                  <AlertCircle className="w-5 h-5 text-red-500" />
-                  <span className="text-sm text-red-700">{error}</span>
+                <div className={`flex items-center gap-2 p-3 border rounded-md ${
+                  error.includes('successfully') || error.includes('copied')
+                    ? 'bg-green-50 border-green-200' 
+                    : 'bg-red-50 border-red-200'
+                }`}>
+                  <AlertCircle className={`w-5 h-5 ${
+                    error.includes('successfully') || error.includes('copied') ? 'text-green-500' : 'text-red-500'
+                  }`} />
+                  <span className={`text-sm ${
+                    error.includes('successfully') || error.includes('copied') ? 'text-green-700' : 'text-red-700'
+                  }`}>{error}</span>
                 </div>
               )}
 
@@ -316,6 +591,11 @@ function App() {
                       title={`${platform === 'tavus' ? 'Tavus' : 'ElevenLabs'} Conversation`}
                     />
                   </div>
+                  {platform === 'tavus' && dailyCallObject && (
+                    <div className="text-sm text-green-600 bg-green-50 p-2 rounded">
+                      ✓ Direct message sending enabled
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="flex items-center justify-center h-64 bg-gray-50 rounded-lg border-2 border-dashed border-gray-300">
